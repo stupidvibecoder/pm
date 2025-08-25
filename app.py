@@ -8,7 +8,7 @@ from datetime import date, timedelta
 st.set_page_config(page_title="Manual Portfolio Tracker", layout="wide")
 st.title("Manual Portfolio Tracker (No Broker API)")
 
-# -------------------------- Helper(s) --------------------------
+# -------------------------- Helpers --------------------------
 @st.cache_data(ttl=300)
 def fetch_prices(tickers, start, end):
     """Download adjusted close prices for a list of tickers, daily frequency."""
@@ -26,30 +26,28 @@ def fetch_prices(tickers, start, end):
     if isinstance(data, pd.DataFrame) and "Close" in data.columns:
         closes = data["Close"].copy()
     else:
-        # single ticker shape
         closes = data.copy()
-        closes.name = tickers[0]
+        if isinstance(tickers, list) and tickers:
+            closes.name = tickers[0]
         closes = pd.DataFrame(closes)
-    # ensure columns are ticker symbols and index is tz-naive
     closes.columns = [str(c) for c in closes.columns]
     if isinstance(closes.index, pd.DatetimeIndex) and closes.index.tz is not None:
         closes.index = closes.index.tz_convert(None)
-    closes = closes.sort_index().dropna(how="all")
-    return closes
+    return closes.sort_index().dropna(how="all")
 
 def validate_lots(df):
-    """Basic validation + coercion."""
+    """Basic validation + coercion of manually entered/CSV lots."""
     df = df.copy()
     rename = {
         "ticker": "ticker",
         "symbol": "ticker",
-        "date": "buy_date",
         "buy_date": "buy_date",
+        "date": "buy_date",
         "shares": "shares",
         "qty": "shares",
         "cost_basis_per_share": "cost_basis_per_share",
-        "cost_basis": "cost_basis_per_share",
         "price": "cost_basis_per_share",
+        "cost_basis": "cost_basis_per_share",
     }
     df.columns = [c.strip() for c in df.columns]
     df = df.rename(columns={c: rename[c] for c in df.columns if c in rename})
@@ -63,39 +61,30 @@ def validate_lots(df):
     df["buy_date"] = pd.to_datetime(df["buy_date"], errors="coerce").dt.date
     df["shares"] = pd.to_numeric(df["shares"], errors="coerce")
     df["cost_basis_per_share"] = pd.to_numeric(df["cost_basis_per_share"], errors="coerce")
-
     df = df.dropna(subset=["ticker", "buy_date", "shares", "cost_basis_per_share"])
     df = df[df["shares"] > 0]
     return df
 
 def build_share_matrix(lots_df, prices):
-    """
-    Create a time-by-ticker matrix of SHARES HELD each day.
-    For each lot, shares start on buy_date (inclusive) and persist.
-    """
+    """Time-by-ticker matrix of shares held each day (step function from buy_date)."""
     if prices.empty:
         return pd.DataFrame(index=pd.DatetimeIndex([]))
-
     dates = prices.index
     tickers = prices.columns.tolist()
     shares_mat = pd.DataFrame(0.0, index=dates, columns=tickers)
-
-    # For each ticker, create a 'buy impulses' series then cumsum
     for tkr in tickers:
         impulses = pd.Series(0.0, index=dates)
         lots_t = lots_df[lots_df["ticker"] == tkr]
         for _, r in lots_t.iterrows():
             d = pd.Timestamp(r["buy_date"])
-            # snap to the first available price date >= buy_date
             loc = dates.searchsorted(d)
             if loc < len(dates):
                 impulses.iloc[loc] += float(r["shares"])
         shares_mat[tkr] = impulses.cumsum()
-
     return shares_mat
 
 def cumulative_invested(lots_df, date_index):
-    """Cumulative cash invested (sum of lot cost) by date."""
+    """Cumulative cash invested over time from the lots."""
     if date_index.empty or lots_df.empty:
         return pd.Series(dtype=float)
     inv = pd.Series(0.0, index=date_index)
@@ -113,11 +102,15 @@ st.sidebar.header("Holdings input")
 tab_manual, tab_csv = st.sidebar.tabs(["Type lots", "Upload CSV"])
 
 with tab_manual:
-    st.sidebar.caption("Enter one row per **lot** (per buy date).")
+    st.sidebar.caption("Enter one row per lot (per buy date).")
     default_rows = pd.DataFrame(
         [
-            {"ticker": "CPRT", "buy_date": date.today() - timedelta(days=400),
-             "shares": 100, "cost_basis_per_share": 40.00},
+            {
+                "ticker": "CPRT",
+                "buy_date": date.today() - timedelta(days=400),
+                "shares": 100,
+                "cost_basis_per_share": 40.00,
+            },
         ]
     )
     lots_editor = st.sidebar.data_editor(
@@ -127,9 +120,13 @@ with tab_manual:
         use_container_width=True,
     )
     lots_source = "manual"
+
 with tab_csv:
     up = st.sidebar.file_uploader("Upload lots CSV", type=["csv"])
-    lots_source = "csv" if up is not None else lots_source
+    if up is not None:
+        lots_source = "csv"
+    else:
+        lots_source = lots_source
 
 if lots_source == "csv" and up is not None:
     try:
@@ -139,7 +136,6 @@ if lots_source == "csv" and up is not None:
         st.error(f"CSV error: {e}")
         st.stop()
 else:
-    # data_editor returns proper dtypes for date/shares; still validate
     try:
         lots_df = validate_lots(pd.DataFrame(lots_editor))
     except Exception as e:
@@ -157,7 +153,7 @@ end_default = date.today()
 
 colA, colB = st.columns(2)
 with colA:
-    start_date = st.date_input("Start date", value=start_default, min_value=date(1990,1,1), max_value=end_default)
+    start_date = st.date_input("Start date", value=start_default, min_value=date(1990, 1, 1), max_value=end_default)
 with colB:
     end_date = st.date_input("End date", value=end_default, min_value=start_date, max_value=end_default)
 
@@ -169,63 +165,74 @@ tickers = sorted(lots_df["ticker"].unique().tolist())
 with st.spinner(f"Downloading daily prices for {', '.join(tickers)}…"):
     prices = fetch_prices(tickers, start_date, end_date)
 if prices.empty:
-    st.error("No price data available for the selected range."); st.stop()
+    st.error("No price data available for the selected range.")
+    st.stop()
 
-# Align lots to trading dates
+# Shares matrix & portfolio value
 shares_mat = build_share_matrix(lots_df, prices)
-# Portfolio value = sum_ticker (shares * price)
 port_val = (shares_mat * prices).sum(axis=1)
-
-# Cumulative invested
 invested = cumulative_invested(lots_df, prices.index)
 
 # -------------------------- Charts --------------------------
 st.subheader("Portfolio value over time")
 fig = go.Figure()
-fig.add_trace(go.Scatter(
-    x=port_val.index, y=port_val.values, mode="lines", name="Portfolio value",
-    hovertemplate="Date: %{x}<br>Value: $%{y:,.0f}<extra></extra>"
-))
+fig.add_trace(
+    go.Scatter(
+        x=port_val.index,
+        y=port_val.values,
+        mode="lines",
+        name="Portfolio value",
+        hovertemplate="Date: %{x}<br>Value: $%{y:,.0f}<extra></extra>",
+    )
+)
 if not invested.empty:
-    fig.add_trace(go.Scatter(
-        x=invested.index, y=invested.values, mode="lines", name="Cumulative invested",
-        hovertemplate="Date: %{x}<br>Invested: $%{y:,.0f}<extra></extra>"
-    ))
-# optional benchmark (indexed to 100 at first in-range day)
+    fig.add_trace(
+        go.Scatter(
+            x=invested.index,
+            y=invested.values,
+            mode="lines",
+            name="Cumulative invested",
+            hovertemplate="Date: %{x}<br>Invested: $%{y:,.0f}<extra></extra>",
+        )
+    )
+
 if bm != "None":
     try:
-        bm_px = fetch_prices([bm], start_date, end_date).iloc[:,0].dropna()
+        bm_px = fetch_prices([bm], start_date, end_date).iloc[:, 0].dropna()
         if not bm_px.empty:
             bm_idx = bm_px / bm_px.iloc[0] * 100.0
-            fig.add_trace(go.Scatter(
-                x=bm_idx.index, y=bm_idx.values, mode="lines", name=f"{bm} (index=100)",
-                hovertemplate="Date: %{x}<br>Index: %{y:.2f}<extra></extra>",
-                line=dict(dash="dash")
-            ))
+            fig.add_trace(
+                go.Scatter(
+                    x=bm_idx.index,
+                    y=bm_idx.values,
+                    mode="lines",
+                    name=f"{bm} (index=100)",
+                    hovertemplate="Date: %{x}<br>Index: %{y:.2f}<extra></extra>",
+                    line=dict(dash="dash"),
+                )
+            )
     except Exception:
         pass
 
 fig.update_layout(
-    template="plotly_white", height=520, hovermode="x unified",
-    xaxis_title="Date", yaxis_title="Dollars ($)"
+    template="plotly_white",
+    height=520,
+    hovermode="x unified",
+    xaxis_title="Date",
+    yaxis_title="Dollars ($)",
 )
 st.plotly_chart(fig, use_container_width=True)
 
 # -------------------------- Positions & P&L --------------------------
 st.subheader("Positions & P&L (current)")
-
-# Aggregate current shares by ticker from the share matrix last row
 cur_shares = shares_mat.iloc[-1].rename("shares").to_frame()
 cur_shares = cur_shares[cur_shares["shares"] > 0]
 if cur_shares.empty:
     st.info("No open positions at the end date.")
 else:
-    # Latest prices
     latest_px = prices.ffill().iloc[-1].rename("last_price")
-    # Average cost per share for currently held qty (from lots)
     lot_costs = (
-        lots_df
-        .groupby("ticker")
+        lots_df.groupby("ticker")
         .apply(lambda g: pd.Series({
             "total_shares": g["shares"].sum(),
             "total_cost": (g["shares"] * g["cost_basis_per_share"]).sum(),
@@ -242,53 +249,43 @@ else:
         pos["unrealized_pnl_pct"] = np.where(
             pos["cost_basis_total"] > 0,
             pos["unrealized_pnl"] / pos["cost_basis_total"] * 100.0,
-            np.nan
+            np.nan,
         )
     pos = pos.reset_index().rename(columns={"index": "ticker"})
-    st.dataframe(
-        pos.sort_values("market_value", ascending=False),
-        use_container_width=True, hide_index=True
-    )
+    st.dataframe(pos.sort_values("market_value", ascending=False), use_container_width=True, hide_index=True)
 
-# -------------------------- Trades/Lots Ledger --------------------------
+# -------------------------- Lots ledger --------------------------
 st.subheader("Lots ledger (input)")
-st.caption("This is the exact data used to compute shares and invested cash.")
+st.caption("Exact data used to compute shares and invested cash.")
 st.dataframe(lots_df.sort_values(["ticker", "buy_date"]).reset_index(drop=True),
              use_container_width=True, hide_index=True)
 
-# -------------------------- Download outputs --------------------------
+# -------------------------- Downloads --------------------------
 st.subheader("Download")
 colx, coly = st.columns(2)
 with colx:
     out_ledger = lots_df.sort_values(["ticker","buy_date"]).reset_index(drop=True)
     st.download_button(
-        "Download lots CSV",
+        label="Download lots CSV",
         data=out_ledger.to_csv(index=False).encode("utf-8"),
         file_name="lots.csv",
         mime="text/csv",
     )
 with coly:
-    # Export portfolio value series
     pv = pd.DataFrame({"date": port_val.index.strftime("%Y-%m-%d"), "portfolio_value": port_val.values})
     st.download_button(
-        "Download portfolio value CSV",
+        label="Download portfolio value CSV",
         data=pv.to_csv(index=False).encode("utf-8"),
         file_name="portfolio_value.csv",
         mime="text/csv",
     )
 
-# -------------------------- Hints --------------------------
+# -------------------------- CSV format hint --------------------------
 with st.expander("CSV format expected"):
-    st.markdown(
-        """
-**Columns (case-insensitive accepted):**
-- `ticker`  
-- `buy_date` (YYYY-MM-DD)  
-- `shares` (positive)  
-- `cost_basis_per_share`  
-
-Example:
-```csv
-ticker,buy_date,shares,cost_basis_per_share
-CPRT,2023-03-01,100,40.00
-AAPL,2023-08-15,10,180.50
+    st.markdown("Columns (case-insensitive): ticker, buy_date (YYYY-MM-DD), shares, cost_basis_per_share")
+    st.code(
+        "ticker,buy_date,shares,cost_basis_per_share\n"
+        "CPRT,2023-03-01,100,40.00\n"
+        "AAPL,2023-08-15,10,180.50\n",
+        language="csv",
+    )
