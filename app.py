@@ -6,7 +6,7 @@ import plotly.graph_objs as go
 from datetime import date, timedelta
 
 st.set_page_config(page_title="Manual Portfolio Tracker", layout="wide")
-st.title("Manual Portfolio Tracker (No Broker API)")
+st.title("Manual Portfolio Tracker")
 
 # -------------------------- Helpers --------------------------
 @st.cache_data(ttl=300)
