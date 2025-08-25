@@ -1,0 +1,7 @@
+streamlit>=1.36
+pandas>=2.2
+numpy>=1.26
+plotly>=5.22
+schwab-py>=0.10.0
+httpx>=0.27
+yfinance>=0.2.40
